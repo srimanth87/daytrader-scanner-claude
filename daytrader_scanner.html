@@ -207,7 +207,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--mono);min-height:1
 </div>
 
 <div class="foot">
-  <span>Finnhub: live quote + 5-min candles &nbsp;|&nbsp; Alpha Vantage: daily history for vol ratio + ATR &nbsp;|&nbsp; Not financial advice</span>
+  <span>Finnhub: live quote + 5-min candles &nbsp;|&nbsp; Yahoo Finance: daily history for vol ratio + ATR &nbsp;|&nbsp; Not financial advice</span>
   <span id="footTime"></span>
 </div>
 </div>
@@ -215,13 +215,12 @@ body{background:var(--bg);color:var(--text);font-family:var(--mono);min-height:1
 <script>
 // ── Keys ───────────────────────────────────────────────────────────────────
 const FH  = "d6bl5k9r01qp4lhvspn0d6bl5k9r01qp4lhvspng";
-const AV  = "137H2I00U5ZWBELY";
-const FH_BASE = "https://finnhub.io/api/v1";
-const AV_BASE = "https://www.alphavantage.co/query";
+const FH_BASE  = "https://finnhub.io/api/v1";
+const YH_BASE  = "https://query1.finance.yahoo.com/v8/finance/chart";
 
 // ── Telegram Alert Config ─────────────────────────────────────────────────
-const TG_TOKEN   = "8570415382:AAF7q0vmO_Vy-KEar2r48fRvoAuLzFAXlZY";   // 🔑 paste your bot token
-const TG_CHAT_ID = "1026720092";     // 💬 paste your chat ID
+const TG_TOKEN   = "8570415382:AAF7q0vmO_Vy-KEar2r48fRvoAuLzFAXlZY";
+const TG_CHAT_ID = "1026720092";
 
 async function sendTelegramAlert(stock) {
   const s = stock._score;
@@ -287,25 +286,24 @@ async function fhCandles5m(sym) {
   return d; // {c,h,l,o,v,t}
 }
 
-// ── Alpha Vantage helpers ─────────────────────────────────────────────────
-const avCache = {};
+// ── Yahoo Finance helpers (replaces Alpha Vantage — no key, no rate limit) ─
+const yhCache = {};
 
-async function avDaily(sym) {
-  if (avCache[sym]) return avCache[sym];
-  const url = `${AV_BASE}?function=TIME_SERIES_DAILY&symbol=${sym}&outputsize=compact&apikey=${AV}`;
+async function yhDaily(sym) {
+  if (yhCache[sym]) return yhCache[sym];
+  // fetch 3 months of daily data — enough for 20-day vol avg + 14-day ATR
+  const url = `https://corsproxy.io/?${encodeURIComponent(`${YH_BASE}/${sym}?interval=1d&range=3mo`)}`;
   const r = await fetch(url);
-  if (!r.ok) throw new Error(`AV ${r.status}`);
+  if (!r.ok) throw new Error(`YH ${r.status}`);
   const json = await r.json();
-  if (json["Note"] || json["Information"]) throw new Error("AV_RATE_LIMIT");
-  const ts = json["Time Series (Daily)"];
-  if (!ts) throw new Error("AV no data");
-  const dates = Object.keys(ts).sort();
-  const closes  = dates.map(d=>parseFloat(ts[d]["4. close"]));
-  const volumes = dates.map(d=>parseFloat(ts[d]["5. volume"]));
-  const highs   = dates.map(d=>parseFloat(ts[d]["2. high"]));
-  const lows    = dates.map(d=>parseFloat(ts[d]["3. low"]));
-  const result  = {closes, volumes, highs, lows, dates};
-  avCache[sym]  = result;
+  const q = json?.chart?.result?.[0];
+  if (!q) throw new Error("YH no data");
+  const closes  = q.indicators.quote[0].close.map(v => v ?? 0);
+  const volumes = q.indicators.quote[0].volume.map(v => v ?? 0);
+  const highs   = q.indicators.quote[0].high.map(v => v ?? 0);
+  const lows    = q.indicators.quote[0].low.map(v => v ?? 0);
+  const result  = {closes, volumes, highs, lows};
+  yhCache[sym]  = result;
   return result;
 }
 
@@ -572,20 +570,17 @@ async function runScan() {
       const aboveVWAP = vwap !== null ? price > vwap : null;
       const intradayVol = intradayVolume(candles5m);
 
-      // Try AV for vol ratio + ATR (rate limited — use cache + delay)
+      // Yahoo Finance for vol ratio + ATR (no rate limit, no API key)
       let volRatio = 0, rangeRatio = 0;
       try {
-        const av = await avDaily(t.sym);
-        const avgVol = avgVolume(av.volumes, 20);
-        // use intraday vol if available, else today's AV vol (last entry)
-        const todayVol = intradayVol > 0 ? intradayVol : (av.volumes[av.volumes.length-1] || 0);
+        const yh = await yhDaily(t.sym);
+        const avgVol = avgVolume(yh.volumes, 20);
+        const todayVol = intradayVol > 0 ? intradayVol : (yh.volumes[yh.volumes.length-1] || 0);
         volRatio = avgVol > 0 ? todayVol/avgVol : 0;
-        const atr = avgTrueRange(av.highs, av.lows, av.closes, 14);
+        const atr = avgTrueRange(yh.highs, yh.lows, yh.closes, 14);
         rangeRatio = (atr > 0 && intradayRange > 0) ? intradayRange/atr : 0;
-      } catch(avErr) {
-        if (avErr.message === "AV_RATE_LIMIT") {
-          log(`⚠ AV rate limit hit — vol ratios unavailable for remaining stocks`, "lwarn");
-        }
+      } catch(yhErr) {
+        log(`⚠ Yahoo data unavailable for ${t.sym}: ${yhErr.message}`, "lwarn");
         // continue without vol data — Finnhub data is still scored
       }
 
@@ -629,7 +624,7 @@ async function runScan() {
   if (results[0]) log(`\n► TOP PICK: ${results[0].sym} — Score ${results[0]._score.pts}/${MAX_PTS} · +${results[0].chgPct.toFixed(2)}%`, "linfo");
 
   // ── Send Telegram alerts for stocks scoring 8+ (MOMENTUM or STRONG MOMENTUM)
-  if (TG_TOKEN !== "8570415382:AAF7q0vmO_Vy-KEar2r48fRvoAuLzFAXlZY") {
+  if (TG_TOKEN !== "YOUR_BOT_TOKEN_HERE") {
     const alerts = results.filter(d => d._score.pts >= 8);
     if (alerts.length) {
       log(`\n📲 Sending Telegram alerts for ${alerts.length} buy signal(s)...`, "linfo");
