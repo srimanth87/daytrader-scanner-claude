@@ -455,6 +455,7 @@ function updateTable(results){
 
 // ── Main scan — parallel batches of 5 for speed ───────────────────────────
 async function runScan(){
+  Object.keys(yhCache).forEach(k => delete yhCache[k]); // clear cache on every rescan
   const btn=document.getElementById("scanBtn");
   btn.disabled=true; btn.textContent="SCANNING...";
   document.getElementById("logBox").innerHTML="";
