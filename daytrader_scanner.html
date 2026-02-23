@@ -440,6 +440,7 @@ function updateStats(all, spyChg) {
 
 // ── Main scan ─────────────────────────────────────────────────────────────
 async function runScan() {
+  Object.keys(yhCache).forEach(k => delete yhCache[k]); // clear cache
   const btn = document.getElementById("scanBtn");
   btn.disabled=true; btn.textContent="SCANNING...";
   document.getElementById("logBox").innerHTML="";
